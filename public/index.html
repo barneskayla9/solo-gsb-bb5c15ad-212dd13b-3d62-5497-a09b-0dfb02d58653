@@ -151,11 +151,15 @@
           <button id="btn-handoff-add" class="btn btn-mini btn-primary" title="新增一项交接：默认取当前选中者与下一名表演者，交接区落在两人当前圆心中点">＋ 新增交接</button>
         </div>
         <div id="handoff-list" class="handoff-list"></div>
+        <div id="handoff-schedule" class="handoff-schedule" hidden></div>
         <div id="handoff-empty" class="cue-empty" hidden></div>
         <div class="cue-hint">
           沿分段直线轨迹连续求两人<strong>圆心同时严格位于交接区内部</strong>且<strong>间距 ≤ 触达距离</strong>
           的区间（贴边停留与仅瞬时触达不计，跨关键帧相接自动合并）；每段 [a,b] 若 b−a ≥ 最短持续秒数 d，
-          给出起始时窗 [a, b−d]。<strong>点击时窗跳转播放头</strong>；编辑走位或交接参数即时重算，配置随快照保存。
+          给出起始时窗 [a, b−d]。用每项的 <strong>↑/↓</strong> 调整顺序，下方<strong>执行表</strong>按列表顺序
+          选取不早于双方各自上一项已排交接结束时刻的最早起点（共用表演者不重叠、首尾相接允许、不共用者并行）：
+          <strong>无可行时窗 / 排程冲突 / 前序未完成</strong>分别标记并向参与者传递。
+          <strong>点击时窗或已排起点跳转播放头</strong>；走位、交接参数或顺序变化即时重算，配置随快照保存。
         </div>
       </div>
 

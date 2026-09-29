@@ -486,6 +486,85 @@ test('GET /api/sample：样例携带交接配置，回传分析得可交接区�
   assert.ok(Math.abs(res.windows[0][1] - (6000 / 880 - 0.5)) < 1e-9);
 });
 
+test('POST /api/analyze：handoffSchedule 同步返回执行表（已排/冲突/前序未完成/并行）', async () => {
+  // 甲 x=10t、乙 x=120-10t（y=50）；丙、丁静止 (300,50)/(310,50)
+  const performers = [
+    { id: 'a', name: '甲', radius: 0, keys: [{ t: 0, x: 0, y: 50 }, { t: 12, x: 120, y: 50 }] },
+    { id: 'b', name: '乙', radius: 0, keys: [{ t: 0, x: 120, y: 50 }, { t: 12, x: 0, y: 50 }] },
+    { id: 'c', name: '丙', radius: 0, keys: [{ t: 0, x: 300, y: 50 }] },
+    { id: 'd', name: '丁', radius: 0, keys: [{ t: 0, x: 310, y: 50 }] }
+  ];
+  const rect = { x: 40, y: 40, width: 40, height: 20, reach: 40 };
+  const body = {
+    duration: 12,
+    performers,
+    handoffs: [
+      Object.assign({ id: 'h1', aId: 'a', bId: 'b', minDuration: 1.5 }, rect),  // 排 4–5.5
+      Object.assign({ id: 'h2', aId: 'a', bId: 'b', minDuration: 3.9 }, rect),  // earliest 5.5 > 4.1 -> conflict
+      Object.assign({ id: 'h3', aId: 'a', bId: 'c', minDuration: 1 }, rect),    // blocked（甲）
+      { id: 'h4', aId: 'c', bId: 'd', x: 290, y: 40, width: 40, height: 20,
+        reach: 40, minDuration: 1 }                                             // blocked（丙传递）
+    ]
+  };
+  const r = await postAnalyze(body);
+  assert.equal(r.status, 200);
+  const sched = r.json.handoffSchedule;
+  assert.ok(Array.isArray(sched), '同步返回 handoffSchedule 执行表');
+  assert.equal(sched.length, 4);
+  assert.deepEqual(sched.map((s) => s.handoffId), ['h1', 'h2', 'h3', 'h4']);
+  assert.deepEqual(sched.map((s) => s.index), [0, 1, 2, 3]);
+
+  assert.equal(sched[0].status, 'scheduled');
+  assert.ok(Math.abs(sched[0].start - 4) < 1e-9);
+  assert.ok(Math.abs(sched[0].end - 5.5) < 1e-9);
+  assert.equal(sched[0].aName, '甲');
+  assert.equal(sched[0].bName, '乙');
+  assert.ok(Math.abs(sched[0].minDuration - 1.5) < 1e-9);
+
+  // h2 时窗 [4,4.1]，双方最早空闲 5.5 > 4.1 -> 排程冲突
+  assert.equal(sched[1].status, 'conflict');
+  assert.equal(sched[1].start, null);
+  assert.equal(sched[1].end, null);
+  assert.ok(Math.abs(sched[1].earliestStart - 5.5) < 1e-9);
+
+  assert.equal(sched[2].status, 'blocked');
+  assert.equal(sched[2].start, null);
+  assert.equal(sched[3].status, 'blocked', '未完成状态经丙继续传递');
+});
+
+test('POST /api/analyze：handoffSchedule 不共用表演者并行；无交接旧请求为空数组', async () => {
+  const performers = [
+    { id: 'a', radius: 0, keys: [{ t: 0, x: 0, y: 50 }, { t: 12, x: 120, y: 50 }] },
+    { id: 'b', radius: 0, keys: [{ t: 0, x: 120, y: 50 }, { t: 12, x: 0, y: 50 }] },
+    { id: 'c', radius: 0, keys: [{ t: 0, x: 300, y: 50 }] },
+    { id: 'd', radius: 0, keys: [{ t: 0, x: 310, y: 50 }] }
+  ];
+  const r = await postAnalyze({
+    duration: 12,
+    performers,
+    handoffs: [
+      { id: 'h1', aId: 'a', bId: 'b', x: 40, y: 40, width: 40, height: 20, reach: 40, minDuration: 1.5 },
+      { id: 'h2', aId: 'c', bId: 'd', x: 290, y: 40, width: 40, height: 20, reach: 40, minDuration: 2 }
+    ]
+  });
+  assert.equal(r.status, 200);
+  const sched = r.json.handoffSchedule;
+  assert.deepEqual(sched.map((s) => s.status), ['scheduled', 'scheduled']);
+  assert.ok(Math.abs(sched[0].start - 4) < 1e-9);
+  assert.ok(Math.abs(sched[1].start - 0) < 1e-9, '不共用表演者：并行排在 0');
+  assert.ok(Math.abs(sched[1].end - 2) < 1e-9);
+
+  const old = await postAnalyze({
+    duration: 12,
+    performers: [
+      { id: 'a', radius: 0, keys: [{ t: 0, x: 0, y: 50 }, { t: 12, x: 120, y: 50 }] },
+      { id: 'b', radius: 0, keys: [{ t: 0, x: 120, y: 50 }, { t: 12, x: 0, y: 50 }] }
+    ]
+  });
+  assert.equal(old.status, 200);
+  assert.deepEqual(old.json.handoffSchedule, []);
+});
+
 // ---------- 区域限员 capacityZones ----------
 
 test('POST /api/analyze：接受 capacityZones 并返回 capacityResults（超员段/名单/峰值）', async () => {

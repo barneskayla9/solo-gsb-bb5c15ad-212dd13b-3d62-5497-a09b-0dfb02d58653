@@ -82,6 +82,14 @@
  * 系数非负的二次不等式，复用 solveQuadraticLE 精确求解；全部子区间经
  * mergeIntervals 合并。全程解析，不做任何离散帧抽样。
  *
+ * 交接列表还可调整顺序并形成**执行表**（buildHandoffSchedule，
+ * handoffSchedule 字段）：按列表顺序沿用每项的起始时窗与最短持续 d，
+ * 选取不早于双方各自上一项**已排**交接结束时刻的最早可行起点；共用表演
+ * 者的交接不得重叠（结束与下一项开始同刻允许），不共用者并行。本项无
+ * 有效时窗记 infeasible（“无可行时窗”）、有时窗但受前项占用无法安排记
+ * conflict（“排程冲突”）、涉及未完成交接参与者的后续项记 blocked
+ * （“前序未完成”，未完成状态继续向其参与者传递），其他项继续排。
+ *
  * ---------- 区域限员（capacity zones） ----------
  *
  * 场景还可携带若干限员区域 capacityZones：
@@ -542,7 +550,9 @@
    * cueResults 为每位携带入场口令的表演者一条有序触发核对结果
    * （triggered / missed / blocked）。
    * handoffs 为规整后的交接配置，handoffResults 每项给出两人同处
-   * 交接区且间距≤触达距离的连续区间与起始时窗。
+   * 交接区且间距≤触达距离的连续区间与起始时窗；handoffSchedule 为按
+   * 列表顺序贪心排成的执行表（已排起止 / 无可行时窗 / 排程冲突 /
+   * 前序未完成）。
    * capacityZones 为规整后的区域限员配置，capacityResults 每项给出
    * 按圆心严格在内部统计的超员时间段（名单变化即分段）与全程峰值人数。
    * riskTimeline 为三类风险（碰撞/禁入区侵入/区域超员）合成为按时间
@@ -633,6 +643,10 @@
       return analyzeHandoff(h, pa, pb, duration);
     });
 
+    // 交接执行表：按列表顺序贪心排程（共用表演者不重叠、首尾相接允许、
+    // 不共用者并行）；无可行时窗/排程冲突/前序未完成分别标记并传递
+    var handoffSchedule = buildHandoffSchedule(handoffResults);
+
     // 区域限员：每个限员区一条超员时间段与全程峰值结果
     var capacityZones = normalizeCapacityZones(scene.capacityZones);
     var capacityResults = capacityZones.map(function (z) {
@@ -663,6 +677,7 @@
       cueResults: cueResults,
       handoffs: handoffs,
       handoffResults: handoffResults,
+      handoffSchedule: handoffSchedule,
       capacityZones: capacityZones,
       capacityResults: capacityResults,
       riskTimeline: riskTimeline,
@@ -1218,6 +1233,123 @@
       if (t + EPS >= iv[0] && t - EPS <= iv[1]) return true;
     }
     return false;
+  }
+
+  // ---------- 道具交接执行表（handoff schedule） ----------
+  //
+  // 交接列表支持调整顺序，按列表顺序形成执行表：沿用每项已算出的起始时窗
+  // 与最短持续时长 d，贪心选取不早于双方各自上一项**已排（scheduled）**
+  // 交接结束时刻的最早可行起点。共用表演者的交接不得时间重叠，一项结束与
+  // 下一项开始同刻允许（首尾相接）；不共用表演者的交接可并行（互不约束）。
+  //
+  // 每项状态（与起始时窗分析互相独立，原有 intervals/windows 行为不变）：
+  //   scheduled     已排入执行表，start/end 为已排起止时刻；
+  //   infeasible    本项无有效时窗（valid=false 或 windows 为空，即
+  //                 “无可行时窗”），不占用任何表演者；
+  //   conflict      有时窗但受前项占用，双方最早空闲时刻晚于所有时窗的
+  //                 最晚起点（“排程冲突”），不占用任何表演者；
+  //   blocked       涉及未完成（infeasible/conflict/blocked）交接参与者
+  //                 的后续项（“前序未完成”），不检查时窗、不占用表演者，
+  //                 未完成状态继续向其参与者传递。
+  //
+  // 只有 scheduled 项才把 [start,end] 登记到双方的“上一项结束时刻”，
+  // 因此未完成项不会阻塞与它不共用表演者的其他项；同刻相接（start 恰等于
+  // 上一项 end）允许，判定时使用 HANDOFF_EPS 浮点容差。
+  var SCHED_STATUS = {
+    SCHEDULED: 'scheduled',
+    INFEASIBLE: 'infeasible',
+    CONFLICT: 'conflict',
+    BLOCKED: 'blocked'
+  };
+
+  /**
+   * 按交接列表顺序贪心生成执行表。
+   * @param {Array} handoffResults analyzeScene 产出的 handoffResults
+   *   （顺序即交接列表顺序；每项含 handoffId/handoff/aId/bId/valid/
+   *   windows 等）。
+   * @returns {Array} 与入参等长、同序的执行项：
+   *   { index, handoffId, aId, bId, aName, bName, minDuration,
+   *     status, start, end, earliestStart }
+   *   scheduled 项 start/end 为已排起止时刻；其余状态 start/end 为 null；
+   *   conflict 项另给出 earliestStart（双方最早空闲时刻）供诊断。
+   */
+  function buildHandoffSchedule(handoffResults) {
+    var list = Array.isArray(handoffResults) ? handoffResults : [];
+    var lastEnd = Object.create(null); // 表演者 id -> 已排交接结束时刻
+    var tainted = Object.create(null); // 参与者 id -> 存在未完成前序交接
+    var out = [];
+    list.forEach(function (res, i) {
+      var aId = res.aId;
+      var bId = res.bId;
+      var d = res.handoff ? Number(res.handoff.minDuration) : NaN;
+      var item = {
+        index: i,
+        handoffId: res.handoffId,
+        aId: aId,
+        bId: bId,
+        aName: res.aName,
+        bName: res.bName,
+        minDuration: isFinite(d) ? d : null,
+        status: null,
+        start: null,
+        end: null,
+        earliestStart: null
+      };
+
+      // 前序未完成：任一方参与者被未完成交接污染，直接挂起并继续传递
+      if (tainted[aId] || tainted[bId]) {
+        item.status = SCHED_STATUS.BLOCKED;
+        tainted[aId] = true;
+        tainted[bId] = true;
+        out.push(item);
+        return;
+      }
+
+      // 无有效时窗：引用无效（同人/表演者缺失）或没有满足 d 的起始时窗
+      if (!res.valid || !res.windows || !res.windows.length) {
+        item.status = SCHED_STATUS.INFEASIBLE;
+        tainted[aId] = true;
+        tainted[bId] = true;
+        out.push(item);
+        return;
+      }
+
+      // 双方各自上一项已排交接结束时刻；不共用表演者的项互不约束
+      var endA = lastEnd[aId];
+      var endB = lastEnd[bId];
+      var earliest = 0;
+      if (endA !== undefined) earliest = Math.max(earliest, endA);
+      if (endB !== undefined) earliest = Math.max(earliest, endB);
+      item.earliestStart = earliest;
+
+      // 在起始时窗中选取不早于 earliest 的最早可行起点（时窗升序）
+      var start = null;
+      for (var k = 0; k < res.windows.length; k++) {
+        var w = res.windows[k];
+        if (w[1] >= earliest - HANDOFF_EPS) {
+          start = Math.max(w[0], earliest);
+          break;
+        }
+      }
+
+      if (start === null) {
+        // 有时窗但全部时窗的最晚起点都早于双方最早空闲时刻：排程冲突
+        item.status = SCHED_STATUS.CONFLICT;
+        tainted[aId] = true;
+        tainted[bId] = true;
+        out.push(item);
+        return;
+      }
+
+      item.status = SCHED_STATUS.SCHEDULED;
+      item.start = start;
+      item.end = start + d;
+      // 登记双方占用（结束与下一项开始同刻允许，不额外加间隔）
+      if (lastEnd[aId] === undefined || item.end > lastEnd[aId]) lastEnd[aId] = item.end;
+      if (lastEnd[bId] === undefined || item.end > lastEnd[bId]) lastEnd[bId] = item.end;
+      out.push(item);
+    });
+    return out;
   }
 
   // ---------- 区域限员（capacity zones） ----------
@@ -2238,6 +2370,8 @@
     normalizeHandoffs: normalizeHandoffs,
     analyzeHandoff: analyzeHandoff,
     isHandoffActive: isHandoffActive,
+    buildHandoffSchedule: buildHandoffSchedule,
+    HANDOFF_SCHED_STATUS: SCHED_STATUS,
     normalizeCapacityZones: normalizeCapacityZones,
     analyzeCapacityZone: analyzeCapacityZone,
     isCapacityOverAt: isCapacityOverAt,

@@ -1212,6 +1212,17 @@
     handoffAfterStructuralChange();
   }
 
+  // 调整交接在执行表中的顺序（↑/↓）；顺序变化后立即重算执行表
+  function moveHandoff(hid, delta) {
+    var i = state.handoffs.findIndex(function (h) { return h.id === hid; });
+    var j = i + delta;
+    if (i < 0 || j < 0 || j >= state.handoffs.length) return;
+    var tmp = state.handoffs[i];
+    state.handoffs[i] = state.handoffs[j];
+    state.handoffs[j] = tmp;
+    handoffAfterStructuralChange();
+  }
+
   function commitHandoffEdit(hid, field, rawValue) {
     var h = state.handoffs.find(function (x) { return x.id === hid; });
     if (!h) return;
@@ -1248,11 +1259,13 @@
     return state.analysis.handoffResults.find(function (r) { return r.handoffId === hid; }) || null;
   }
 
-  // 点击起始时窗芯片：播放头跳到时窗起点（事件委托）
-  handoffListEl.addEventListener('click', function (e) {
+  // 点击起始时窗 / 执行表已排起点芯片：播放头跳到对应起点。
+  // 时窗在 #handoff-list、执行表在相邻的 #handoff-schedule，委托到共同面板
+  var handoffPanelEl = document.getElementById('panel-handoffs');
+  handoffPanelEl.addEventListener('click', function (e) {
     var el = e.target && typeof e.target.closest === 'function'
-      ? e.target.closest('.handoff-win-chip') : null;
-    if (!el || !handoffListEl.contains(el)) return;
+      ? e.target.closest('.handoff-win-chip, .handoff-sched-chip') : null;
+    if (!el || !handoffPanelEl.contains(el)) return;
     var t = Number(el.getAttribute('data-t'));
     if (isFinite(t)) seek(t);
   });
@@ -1332,7 +1345,71 @@
       var res = handoffResultById(h.id);
       resultEl.innerHTML = handoffResultHtml(h, res);
       row.classList.toggle('feasible', !!(res && res.feasible));
+      var sched = handoffScheduleById(h.id);
+      row.classList.toggle(
+        'sched-scheduled', !!sched && sched.status === 'scheduled');
+      row.classList.toggle(
+        'sched-infeasible', !!sched && sched.status === 'infeasible');
+      row.classList.toggle(
+        'sched-conflict', !!sched && sched.status === 'conflict');
+      row.classList.toggle(
+        'sched-blocked', !!sched && sched.status === 'blocked');
     });
+    renderHandoffSchedule();
+  }
+
+  // ---------- 交接执行表（按列表顺序贪心排程） ----------
+  var HANDOFF_STATUS_TEXT = {
+    scheduled: '✓ 已排',
+    infeasible: '无可行时窗',
+    conflict: '排程冲突',
+    blocked: '前序未完成'
+  };
+
+  function handoffScheduleById(hid) {
+    if (!state.analysis || !Array.isArray(state.analysis.handoffSchedule)) return null;
+    return state.analysis.handoffSchedule.find(function (s) { return s.handoffId === hid; }) || null;
+  }
+
+  function handoffScheduleEl() {
+    return document.getElementById('handoff-schedule');
+  }
+
+  // 执行表：每项一行，列状态与已排起止时刻；已排起点可点击跳转播放头
+  function renderHandoffSchedule() {
+    var box = handoffScheduleEl();
+    if (!box) return;
+    if (!state.handoffs.length) {
+      box.hidden = true;
+      box.innerHTML = '';
+      return;
+    }
+    box.hidden = false;
+    var rows = state.analysis.handoffSchedule || [];
+    var html = '<div class="handoff-sched-head">执行表（按上方列表顺序；共用表演者不重叠，' +
+      '首尾相接允许，不共用者并行）</div>';
+    rows.forEach(function (s, i) {
+      var pair = (s.aName || s.aId) + ' × ' + (s.bName || s.bId);
+      var when = '';
+      if (s.status === 'scheduled') {
+        when = '<span class="handoff-sched-chip" data-t="' + s.start +
+          '" title="点击跳转播放头到已排起点 ' + fmt(s.start) + ' s">' +
+          fmt(s.start) + '</span>' +
+          '<span class="handoff-sched-sep">–</span>' +
+          '<span class="handoff-sched-end">' + fmt(s.end) + ' s</span>';
+      } else if (s.status === 'conflict') {
+        when = '<span class="handoff-sched-note">双方最早空闲 ' +
+          fmt(s.earliestStart) + ' s，晚于全部起始时窗</span>';
+      }
+      html += '<div class="handoff-sched-row sched-' + s.status + '">' +
+        '<span class="handoff-sched-ord">' + cueOrdinal(i + 1) + '</span>' +
+        '<span class="handoff-sched-pair">' + pair + '</span>' +
+        '<span class="handoff-sched-status sched-status-' + s.status + '">' +
+        (HANDOFF_STATUS_TEXT[s.status] || s.status) + '</span>' +
+        '<span class="handoff-sched-when">' + when + '</span>' +
+        '</div>';
+    });
+    box.innerHTML = html;
   }
 
   function renderHandoffs() {
@@ -1345,26 +1422,50 @@
     }
     handoffEmptyEl.hidden = true;
 
-    state.handoffs.forEach(function (h) {
+    state.handoffs.forEach(function (h, i) {
       var row = document.createElement('div');
       row.className = 'handoff-row';
       row.dataset.hid = h.id;
 
       var head = document.createElement('div');
       head.className = 'handoff-row-head';
+      var ord = document.createElement('span');
+      ord.className = 'handoff-ord cue-ord';
+      ord.textContent = cueOrdinal(i + 1);
+      ord.title = '执行顺序（用 ↑/↓ 调整）';
+      head.appendChild(ord);
       head.appendChild(handoffPerformerSelect(h, 'aId'));
       var times = document.createElement('span');
       times.className = 'handoff-x';
       times.textContent = '×';
       head.appendChild(times);
       head.appendChild(handoffPerformerSelect(h, 'bId'));
+      var moveWrap = document.createElement('span');
+      moveWrap.className = 'cue-move';
+      var up = document.createElement('button');
+      up.type = 'button';
+      up.className = 'btn btn-mini cue-nav handoff-nav';
+      up.textContent = '↑';
+      up.title = '前移（提前执行顺序）';
+      up.disabled = i === 0;
+      up.addEventListener('click', function (e) { e.stopPropagation(); moveHandoff(h.id, -1); });
+      var down = document.createElement('button');
+      down.type = 'button';
+      down.className = 'btn btn-mini cue-nav handoff-nav';
+      down.textContent = '↓';
+      down.title = '后移（延后执行顺序）';
+      down.disabled = i === state.handoffs.length - 1;
+      down.addEventListener('click', function (e) { e.stopPropagation(); moveHandoff(h.id, 1); });
       var del = document.createElement('button');
       del.type = 'button';
       del.className = 'btn btn-mini handoff-del';
       del.textContent = '✕';
       del.title = '删除该交接';
       del.addEventListener('click', function () { removeHandoff(h.id); });
-      head.appendChild(del);
+      moveWrap.appendChild(up);
+      moveWrap.appendChild(down);
+      moveWrap.appendChild(del);
+      head.appendChild(moveWrap);
       row.appendChild(head);
 
       var fields = document.createElement('div');

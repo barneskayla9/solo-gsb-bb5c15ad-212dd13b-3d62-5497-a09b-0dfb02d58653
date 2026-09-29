@@ -936,8 +936,166 @@ test('道具交接：拖走位即时重算，且配置随快照保存并在载�
   dom.window.close();
 });
 
-// ---------- 区域限员 ----------
+test('道具交接执行表：样例单项已排，渲染状态/起止时刻，点击已排起点跳转播放头', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
 
+  const schedBox = doc.getElementById('handoff-schedule');
+  assert.ok(!schedBox.hidden, '有交接时执行表显示');
+  const schedRows = [...schedBox.querySelectorAll('.handoff-sched-row')];
+  assert.equal(schedRows.length, 1);
+  const r = schedRows[0];
+  assert.ok(r.classList.contains('sched-scheduled'), '已排行带 sched-scheduled');
+  assert.match(r.querySelector('.handoff-sched-status').textContent, /已排/);
+  const chip = r.querySelector('.handoff-sched-chip');
+  assert.ok(chip, '已排起点为可点击芯片');
+  assert.match(chip.textContent, /5\.18/);
+  assert.match(r.querySelector('.handoff-sched-when').textContent, /5\.68\s*s/, '结束=起点+0.5');
+
+  // 行左边状态色：已排
+  assert.ok(doc.querySelector('.handoff-row.sched-scheduled'), '交接行按已排着色');
+
+  // 点击已排起点跳转播放头
+  chip.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  const tv = Number(doc.getElementById('time-input').value);
+  assert.ok(Math.abs(tv - 5.18) < 0.01, `播放头应跳到已排起点 5.18，实际 ${tv}`);
+  dom.window.close();
+});
+
+test('道具交接执行表：新增交接串行排入，参数变化致排程冲突，↑/↓ 调整顺序即时重排', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+
+  function rowInputs(row) {
+    return [...row.querySelectorAll('input[type="number"]')];
+  }
+  function setField(rowIdx, fieldIdx, val) {
+    const inp = rowInputs(doc.querySelectorAll('.handoff-row')[rowIdx])[fieldIdx];
+    inp.value = val;
+    inp.dispatchEvent(new window.Event('change', { bubbles: true }));
+    return new Promise((r) => setTimeout(r, 5));
+  }
+  // 新增一项交接并改为与样例相同的中央交接区（甲×乙、触达 80），持续 1s
+  doc.getElementById('btn-handoff-add').click();
+  await new Promise((r) => setTimeout(r, 5));
+  // 输入顺序：x, y, 宽, 高, 触达, 持续
+  await setField(1, 0, '440');
+  await setField(1, 1, '240');
+  await setField(1, 2, '120');
+  await setField(1, 3, '120');
+  await setField(1, 4, '80');
+  await setField(1, 5, '1');
+
+  // 两项甲×乙共用同一可交接区间 [5.18,6.82]：样例 d=0.5 时窗 [5.18,6.32]
+  // 排 5.18–5.68；新项 d=1 时窗 [5.18,5.82]，earliest=5.68 -> 串行排 5.68–6.68
+  let schedRows = [...doc.querySelectorAll('.handoff-sched-row')];
+  assert.equal(schedRows.length, 2);
+  assert.deepEqual(schedRows.map((r) => r.classList.contains('sched-scheduled')), [true, true]);
+  assert.match(schedRows[0].querySelector('.handoff-sched-when').textContent, /5\.18[\s\S]*5\.68/);
+  assert.match(schedRows[1].querySelector('.handoff-sched-when').textContent, /5\.68[\s\S]*6\.68/);
+
+  // 把第 2 项持续改为 1.5：其窗口变为 [5.18,5.32]，earliest=5.68 > 5.32 -> 排程冲突
+  await setField(1, 5, '1.5');
+  schedRows = [...doc.querySelectorAll('.handoff-sched-row')];
+  assert.ok(schedRows[0].classList.contains('sched-scheduled'));
+  assert.ok(schedRows[1].classList.contains('sched-conflict'), '第二项排程冲突');
+  assert.match(schedRows[1].querySelector('.handoff-sched-status').textContent, /排程冲突/);
+  assert.match(schedRows[1].textContent, /双方最早空闲/);
+  assert.ok(doc.querySelectorAll('.handoff-row')[1].classList.contains('sched-conflict'),
+    '交接行按冲突着色');
+
+  // 持续改回 1 后两项均可排；↑ 把新项移到最前，顺序变化即时重排：
+  // 先排 d=1 项 5.18–6.18，样例（d=0.5）顺延 6.18–6.68
+  await setField(1, 5, '1');
+  const navUp = doc.querySelectorAll('.handoff-row')[1].querySelectorAll('.handoff-nav')[0];
+  navUp.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  schedRows = [...doc.querySelectorAll('.handoff-sched-row')];
+  assert.deepEqual(schedRows.map((r) => r.classList.contains('sched-scheduled')), [true, true]);
+  assert.match(schedRows[0].querySelector('.handoff-sched-when').textContent, /5\.18[\s\S]*6\.18/,
+    '移到最前后先排 d=1 项，结束 6.18');
+  assert.match(schedRows[1].querySelector('.handoff-sched-when').textContent, /6\.18[\s\S]*6\.68/,
+    '原首项顺延到 6.18–6.68');
+  const ords = [...doc.querySelectorAll('.handoff-row .handoff-ord')].map((e) => e.textContent);
+  assert.deepEqual(ords, ['①', '②']);
+  // 首行 ↑ 禁用、末行 ↓ 禁用
+  const navs = [...doc.querySelectorAll('.handoff-row')].map((row) =>
+    [...row.querySelectorAll('.handoff-nav')].map((b) => b.disabled));
+  assert.deepEqual(navs, [[true, false], [false, true]]);
+
+  // ↓ 移回：恢复 5.18–5.68 / 5.68–6.68
+  const navDown = doc.querySelectorAll('.handoff-row')[0].querySelectorAll('.handoff-nav')[1];
+  navDown.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  schedRows = [...doc.querySelectorAll('.handoff-sched-row')];
+  assert.match(schedRows[0].querySelector('.handoff-sched-when').textContent, /5\.18[\s\S]*5\.68/);
+  assert.match(schedRows[1].querySelector('.handoff-sched-when').textContent, /5\.68[\s\S]*6\.68/);
+  dom.window.close();
+});
+
+test('道具交接执行表：无可行时窗 -> 前序未完成链传递；删除后恢复；无交接时隐藏', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+
+  function rowInputs(row) {
+    return [...row.querySelectorAll('input[type="number"]')];
+  }
+  // 新增第 2 项甲×乙交接，配置成中央交接区但持续 5s（区间约 1.64s < 5）：
+  // 顺序在样例之后，本身无可行时窗
+  doc.getElementById('btn-handoff-add').click();
+  await new Promise((r) => setTimeout(r, 5));
+  let newRow = doc.querySelectorAll('.handoff-row')[1];
+  const vals = ['440', '240', '120', '120'];
+  for (let k = 0; k < vals.length; k++) {
+    const inp = rowInputs(doc.querySelectorAll('.handoff-row')[1])[k];
+    inp.value = vals[k];
+    inp.dispatchEvent(new window.Event('change', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  const dInput = rowInputs(doc.querySelectorAll('.handoff-row')[1])[5];
+  dInput.value = '5';
+  dInput.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+
+  let schedRows = [...doc.querySelectorAll('.handoff-sched-row')];
+  assert.ok(schedRows[0].classList.contains('sched-scheduled'));
+  assert.ok(schedRows[1].classList.contains('sched-infeasible'), '持续不足 -> 无可行时窗');
+  assert.match(schedRows[1].querySelector('.handoff-sched-status').textContent, /无可行时窗/);
+
+  // 再新增第 3 项（默认甲×乙，但交接区在 t=0 中点、几何上本不可行）：
+  // 因甲、乙已被第 2 项污染，直接前序未完成，不看自身时窗
+  doc.getElementById('btn-handoff-add').click();
+  await new Promise((r) => setTimeout(r, 5));
+  schedRows = [...doc.querySelectorAll('.handoff-sched-row')];
+  assert.equal(schedRows.length, 3);
+  assert.ok(schedRows[2].classList.contains('sched-blocked'), '涉及未完成参与者 -> 前序未完成');
+  assert.match(schedRows[2].querySelector('.handoff-sched-status').textContent, /前序未完成/);
+  assert.ok(!schedRows[2].querySelector('.handoff-sched-chip'), '前序未完成项无已排起点');
+
+  // 删掉无可行时窗项及其后续，回到单项：执行表恢复
+  doc.querySelectorAll('.handoff-row')[2].querySelector('.handoff-del')
+    .dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  doc.querySelectorAll('.handoff-row')[1].querySelector('.handoff-del')
+    .dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  schedRows = [...doc.querySelectorAll('.handoff-sched-row')];
+  assert.equal(schedRows.length, 1);
+  assert.ok(schedRows[0].classList.contains('sched-scheduled'));
+
+  // 全部删除：执行表隐藏
+  doc.querySelector('.handoff-row .handoff-del')
+    .dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(doc.querySelectorAll('.handoff-sched-row').length, 0);
+  assert.ok(doc.getElementById('handoff-schedule').hidden, '无交接时执行表隐藏');
+  dom.window.close();
+});
+
+// ---------- 区域限员 ----------
 test('区域限员：启动即渲染样例限员区，超员段/人数/名单/峰值正确，点击起点跳转', async () => {
   const dom = await boot();
   const { window } = dom;
