@@ -147,15 +147,19 @@
 
       <div class="panel panel-handoffs" id="panel-handoffs">
         <div class="panel-head">
-          <span>道具交接（时窗）</span>
+          <span>道具交接（时窗 · 执行表）</span>
           <button id="btn-handoff-add" class="btn btn-mini btn-primary" title="新增一项交接：默认取当前选中者与下一名表演者，交接区落在两人当前圆心中点">＋ 新增交接</button>
         </div>
         <div id="handoff-list" class="handoff-list"></div>
         <div id="handoff-empty" class="cue-empty" hidden></div>
+        <div id="handoff-schedule" class="handoff-schedule" hidden></div>
         <div class="cue-hint">
           沿分段直线轨迹连续求两人<strong>圆心同时严格位于交接区内部</strong>且<strong>间距 ≤ 触达距离</strong>
           的区间（贴边停留与仅瞬时触达不计，跨关键帧相接自动合并）；每段 [a,b] 若 b−a ≥ 最短持续秒数 d，
-          给出起始时窗 [a, b−d]。<strong>点击时窗跳转播放头</strong>；编辑走位或交接参数即时重算，配置随快照保存。
+          给出起始时窗 [a, b−d]。<strong>点击时窗跳转播放头</strong>。用 <strong>↑ / ↓</strong> 调整交接顺序后，
+          下方<strong>执行表</strong>按列表顺序逐项排定起止：共用表演者的交接不重叠（结束与下一项开始同刻允许），
+          不共用的可并行；未完成项使其参与者的后续项<strong>前序未完成</strong>。<strong>点击已排起点跳转播放头</strong>；
+          编辑走位、交接参数或顺序即时重算，配置（含顺序）随快照保存。
         </div>
       </div>
 

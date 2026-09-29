@@ -82,6 +82,16 @@
  * 系数非负的二次不等式，复用 solveQuadraticLE 精确求解；全部子区间经
  * mergeIntervals 合并。全程解析，不做任何离散帧抽样。
  *
+ * 在时窗之上，交接列表还按列表顺序排成**执行表**（scheduleHandoffs）：
+ * 同一表演者可能参与多项交接，共用表演者的交接不得重叠（结束与下一项
+ * 开始同刻允许），不共用表演者的交接可并行。按列表顺序逐项贪心：每项
+ * 沿用已算出的起始时窗与最短持续 d，选取不早于双方各自上一项已排交接
+ * 结束时刻的最早可行起点（升序扫描时窗，首个能容纳 max(时窗起点, 双方
+ * 最早可用时刻) 的时窗即取）。本项无有效时窗记为"无可行时窗"；有时窗
+ * 但受前项占用而无法安排记为"排程冲突"；涉及未完成交接（无可行时窗 /
+ * 排程冲突 / 前序未完成）参与者的后续项记为"前序未完成"，并继续向其
+ * 参与者传递——其余不相关的项不受影响，继续排程。
+ *
  * ---------- 区域限员（capacity zones） ----------
  *
  * 场景还可携带若干限员区域 capacityZones：
@@ -542,7 +552,9 @@
    * cueResults 为每位携带入场口令的表演者一条有序触发核对结果
    * （triggered / missed / blocked）。
    * handoffs 为规整后的交接配置，handoffResults 每项给出两人同处
-   * 交接区且间距≤触达距离的连续区间与起始时窗。
+   * 交接区且间距≤触达距离的连续区间与起始时窗；handoffSchedule 按列表
+   * 顺序把各项排成执行表（共用表演者不重叠、结束与开始同刻允许；
+   * scheduled / no-window / conflict / blocked 四态）。
    * capacityZones 为规整后的区域限员配置，capacityResults 每项给出
    * 按圆心严格在内部统计的超员时间段（名单变化即分段）与全程峰值人数。
    * riskTimeline 为三类风险（碰撞/禁入区侵入/区域超员）合成为按时间
@@ -633,6 +645,11 @@
       return analyzeHandoff(h, pa, pb, duration);
     });
 
+    // 交接执行表：按列表顺序把各项排成起止时刻（共用表演者不重叠，
+    // 结束与下一项开始同刻允许；无可行时窗/排程冲突/前序未完成三态
+    // 未完成并向其参与者传递）
+    var handoffSchedule = scheduleHandoffs(handoffResults);
+
     // 区域限员：每个限员区一条超员时间段与全程峰值结果
     var capacityZones = normalizeCapacityZones(scene.capacityZones);
     var capacityResults = capacityZones.map(function (z) {
@@ -663,6 +680,7 @@
       cueResults: cueResults,
       handoffs: handoffs,
       handoffResults: handoffResults,
+      handoffSchedule: handoffSchedule,
       capacityZones: capacityZones,
       capacityResults: capacityResults,
       riskTimeline: riskTimeline,
@@ -1218,6 +1236,74 @@
       if (t + EPS >= iv[0] && t - EPS <= iv[1]) return true;
     }
     return false;
+  }
+
+  /**
+   * 交接执行表：把 handoffResults（与交接列表同序）按列表顺序排成
+   * 逐项的起止时刻。同一表演者可能参与多项交接，共用表演者的交接不得
+   * 重叠（一项结束与下一项开始同刻允许），不共用表演者的交接可并行。
+   *
+   * 逐项贪心：每项沿用已算出的起始时窗 windows 与最短持续 minDuration，
+   * 选取不早于双方各自上一项已排交接结束时刻的最早可行起点——升序扫描
+   * 时窗，首个能容纳 s = max(时窗起点, 双方最早可用时刻)（s ≤ 时窗终点）
+   * 的时窗即取，排定占用 [s, s+d]。
+   *
+   * 状态：
+   *  - scheduled  已排定（start/end 为已排起止时刻，window 为选用的时窗）
+   *  - no-window  无可行时窗（本项无有效时窗：配置无效或全程无可用时窗）
+   *  - conflict   排程冲突（有时窗，但双方被各自前项占用到时窗全部错过）
+   *  - blocked    前序未完成（涉及未完成交接的参与者；并继续向其参与者
+   *               传递——未完成项的双方参与者都使各自的后续项挂起）
+   * 不共用参与者的项不受未完成项影响，继续排程。
+   *
+   * 返回与 handoffResults 同序的数组：
+   *   [{ handoffId, status, start, end, window }]
+   * 未排定项的 start/end/window 为 null。
+   */
+  function scheduleHandoffs(handoffResults) {
+    var results = Array.isArray(handoffResults) ? handoffResults : [];
+    var busyUntil = {}; // 表演者 id -> 其上一项已排交接的结束时刻
+    var tainted = {};   // 表演者 id -> 其某项前序交接未完成
+    return results.map(function (res) {
+      var aId = res.aId;
+      var bId = res.bId;
+      var entry = { handoffId: res.handoffId, status: null, start: null, end: null, window: null };
+      if (tainted[aId] || tainted[bId]) {
+        // 前序未完成：本项挂起，并继续向双方参与者的后续项传递
+        entry.status = 'blocked';
+        tainted[aId] = true;
+        tainted[bId] = true;
+        return entry;
+      }
+      var windows = res.valid && res.feasible ? res.windows : [];
+      if (!windows.length) {
+        entry.status = 'no-window';
+        tainted[aId] = true;
+        tainted[bId] = true;
+        return entry;
+      }
+      // 不早于双方各自上一项已排交接的结束时刻（结束与开始同刻允许）
+      var earliest = Math.max(busyUntil[aId] || 0, busyUntil[bId] || 0);
+      var d = res.handoff ? Number(res.handoff.minDuration) : NaN;
+      for (var i = 0; i < windows.length; i++) {
+        var w = windows[i];
+        var s = Math.max(w[0], earliest);
+        if (s <= w[1] + EPS) {
+          entry.status = 'scheduled';
+          entry.start = s;
+          entry.end = s + d;
+          entry.window = [w[0], w[1]];
+          busyUntil[aId] = entry.end;
+          busyUntil[bId] = entry.end;
+          return entry;
+        }
+      }
+      // 有时窗但双方被前项占用到全部时窗错过
+      entry.status = 'conflict';
+      tainted[aId] = true;
+      tainted[bId] = true;
+      return entry;
+    });
   }
 
   // ---------- 区域限员（capacity zones） ----------
@@ -2238,6 +2324,7 @@
     normalizeHandoffs: normalizeHandoffs,
     analyzeHandoff: analyzeHandoff,
     isHandoffActive: isHandoffActive,
+    scheduleHandoffs: scheduleHandoffs,
     normalizeCapacityZones: normalizeCapacityZones,
     analyzeCapacityZone: analyzeCapacityZone,
     isCapacityOverAt: isCapacityOverAt,

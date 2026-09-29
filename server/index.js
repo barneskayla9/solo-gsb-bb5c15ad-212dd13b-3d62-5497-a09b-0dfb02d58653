@@ -75,7 +75,14 @@ function resolveScene(duration, performers, obstacles, handoffs, capacityZones, 
  * reach 为最大圆心触达距离，minDuration(d>0) 为最短持续秒数；返回
  * handoffResults——两人圆心同时严格位于交接区内部且间距≤reach 的
  * 连续区间（贴边停留与仅瞬时触达不计），以及每段满足 b-a≥d 时给出的
- * 起始时窗 [a, b-d]。
+ * 起始时窗 [a, b-d]。另返回 handoffSchedule——按列表顺序排定的交接
+ * 执行表：每项沿用其起始时窗与最短持续秒数，选取不早于双方各自上一项
+ * 已排交接结束时刻的最早可行起点（共用表演者的交接不重叠、结束与下一项
+ * 开始同刻允许，不共用表演者的可并行）；每项形如
+ * {handoffId, status, start, end, window}，status 为 scheduled（已排定，
+ * start/end 为已排起止）/ no-window（无可行时窗）/ conflict（排程冲突：
+ * 有时窗但受前项占用无法安排）/ blocked（前序未完成：涉及未完成交接的
+ * 参与者，并继续向其参与者传递，其余项继续排）。
  * capacityZones 为区域限员配置：轴对齐矩形 + 正整数人数上限 limit；
  * 返回 capacityResults——只统计圆心严格位于内部者的超员（count>limit）
  * 连续时间段（贴边、瞬时触角、零宽高区域不计；同刻进出一并处理、不

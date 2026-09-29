@@ -1171,6 +1171,7 @@
   var handoffListEl = document.getElementById('handoff-list');
   var handoffEmptyEl = document.getElementById('handoff-empty');
   var handoffAddBtn = document.getElementById('btn-handoff-add');
+  var handoffScheduleEl = document.getElementById('handoff-schedule');
   var HANDOFF_NEW_SIZE = 120;     // 新增交接区的默认边长
   var HANDOFF_NEW_REACH = 60;     // 新增交接的默认触达距离
   var HANDOFF_NEW_DURATION = 1;   // 新增交接的默认最短持续秒数
@@ -1209,6 +1210,17 @@
 
   function removeHandoff(hid) {
     state.handoffs = state.handoffs.filter(function (h) { return h.id !== hid; });
+    handoffAfterStructuralChange();
+  }
+
+  // 调整交接在列表中的执行顺序（执行表按列表顺序排定）
+  function moveHandoff(hid, delta) {
+    var i = state.handoffs.findIndex(function (h) { return h.id === hid; });
+    var j = i + delta;
+    if (i < 0 || j < 0 || j >= state.handoffs.length) return;
+    var tmp = state.handoffs[i];
+    state.handoffs[i] = state.handoffs[j];
+    state.handoffs[j] = tmp;
     handoffAfterStructuralChange();
   }
 
@@ -1253,6 +1265,15 @@
     var el = e.target && typeof e.target.closest === 'function'
       ? e.target.closest('.handoff-win-chip') : null;
     if (!el || !handoffListEl.contains(el)) return;
+    var t = Number(el.getAttribute('data-t'));
+    if (isFinite(t)) seek(t);
+  });
+
+  // 执行表：点击已排起点芯片跳转播放头（事件委托）
+  handoffScheduleEl.addEventListener('click', function (e) {
+    var el = e.target && typeof e.target.closest === 'function'
+      ? e.target.closest('.handoff-sched-start') : null;
+    if (!el || !handoffScheduleEl.contains(el)) return;
     var t = Number(el.getAttribute('data-t'));
     if (isFinite(t)) seek(t);
   });
@@ -1333,6 +1354,47 @@
       resultEl.innerHTML = handoffResultHtml(h, res);
       row.classList.toggle('feasible', !!(res && res.feasible));
     });
+    renderHandoffSchedule();
+  }
+
+  var HANDOFF_SCHED_STATUS = {
+    'scheduled': { text: '✓ 已排定', cls: 'handoff-sched-status-scheduled' },
+    'no-window': { text: '无可行时窗', cls: 'handoff-sched-status-no-window' },
+    'conflict': { text: '排程冲突', cls: 'handoff-sched-status-conflict' },
+    'blocked': { text: '前序未完成', cls: 'handoff-sched-status-blocked' }
+  };
+
+  // 交接执行表：按列表顺序逐项显示状态与已排起止时刻（起点可点击跳转）
+  function renderHandoffSchedule() {
+    var schedule = state.analysis && state.analysis.handoffSchedule
+      ? state.analysis.handoffSchedule : [];
+    if (!state.handoffs.length || !schedule.length) {
+      handoffScheduleEl.hidden = true;
+      handoffScheduleEl.innerHTML = '';
+      return;
+    }
+    handoffScheduleEl.hidden = false;
+    var html = '<div class="handoff-sched-head">执行表（按列表顺序 · 共用表演者不重叠）</div>';
+    schedule.forEach(function (entry, i) {
+      var res = handoffResultById(entry.handoffId);
+      var names = res ? (escapeHtml(res.aName) + ' × ' + escapeHtml(res.bName))
+        : escapeHtml(entry.handoffId);
+      var st = HANDOFF_SCHED_STATUS[entry.status] ||
+        { text: entry.status, cls: '' };
+      var times = '';
+      if (entry.status === 'scheduled') {
+        times = '<span class="handoff-sched-start" data-t="' + entry.start +
+          '" title="点击跳转播放头到已排起点 ' + fmt(entry.start) + ' s">' +
+          fmt(entry.start) + '</span>–' + fmt(entry.end) + ' s';
+      }
+      html += '<div class="handoff-sched-row" data-hid="' + escapeHtml(entry.handoffId) + '">' +
+        '<span class="handoff-ord">' + cueOrdinal(i + 1) + '</span>' +
+        '<span class="handoff-sched-names">' + names + '</span>' +
+        '<span class="handoff-sched-status ' + st.cls + '">' + st.text + '</span>' +
+        '<span class="handoff-sched-times">' + times + '</span>' +
+        '</div>';
+    });
+    handoffScheduleEl.innerHTML = html;
   }
 
   function renderHandoffs() {
@@ -1345,19 +1407,42 @@
     }
     handoffEmptyEl.hidden = true;
 
-    state.handoffs.forEach(function (h) {
+    state.handoffs.forEach(function (h, i) {
       var row = document.createElement('div');
       row.className = 'handoff-row';
       row.dataset.hid = h.id;
 
       var head = document.createElement('div');
       head.className = 'handoff-row-head';
+      var ord = document.createElement('span');
+      ord.className = 'handoff-ord';
+      ord.textContent = cueOrdinal(i + 1);
+      head.appendChild(ord);
       head.appendChild(handoffPerformerSelect(h, 'aId'));
       var times = document.createElement('span');
       times.className = 'handoff-x';
       times.textContent = '×';
       head.appendChild(times);
       head.appendChild(handoffPerformerSelect(h, 'bId'));
+      var moveWrap = document.createElement('span');
+      moveWrap.className = 'handoff-move';
+      var up = document.createElement('button');
+      up.type = 'button';
+      up.className = 'btn btn-mini handoff-nav';
+      up.textContent = '↑';
+      up.title = '前移（提前执行顺序）';
+      up.disabled = i === 0;
+      up.addEventListener('click', function () { moveHandoff(h.id, -1); });
+      var down = document.createElement('button');
+      down.type = 'button';
+      down.className = 'btn btn-mini handoff-nav';
+      down.textContent = '↓';
+      down.title = '后移（延后执行顺序）';
+      down.disabled = i === state.handoffs.length - 1;
+      down.addEventListener('click', function () { moveHandoff(h.id, 1); });
+      moveWrap.appendChild(up);
+      moveWrap.appendChild(down);
+      head.appendChild(moveWrap);
       var del = document.createElement('button');
       del.type = 'button';
       del.className = 'btn btn-mini handoff-del';

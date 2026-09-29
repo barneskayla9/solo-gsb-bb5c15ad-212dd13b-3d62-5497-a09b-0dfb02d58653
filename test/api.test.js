@@ -457,7 +457,70 @@ test('POST /api/analyze：无 handoffs 的旧请求保持兼容（空数组）',
   assert.equal(r.status, 200);
   assert.deepEqual(r.json.handoffs, []);
   assert.deepEqual(r.json.handoffResults, []);
+  assert.deepEqual(r.json.handoffSchedule, []);
   assert.deepEqual(r.json.scene.handoffs, []);
+});
+
+test('POST /api/analyze：handoffSchedule 按列表顺序返回执行表（四态齐全）', async () => {
+  // 甲、乙、丁、戊静止在交接区内；丙匀速横穿（t∈(4,8) 在区内）
+  const zone = { x: 40, y: 40, width: 40, height: 20 };
+  const body = {
+    duration: 12,
+    performers: [
+      { id: 'a', name: '甲', radius: 0, keys: [{ t: 0, x: 50, y: 50 }] },
+      { id: 'b', name: '乙', radius: 0, keys: [{ t: 0, x: 55, y: 50 }] },
+      { id: 'c', name: '丙', radius: 0, keys: [{ t: 0, x: 0, y: 50 }, { t: 12, x: 120, y: 50 }] },
+      { id: 'd', name: '丁', radius: 0, keys: [{ t: 0, x: 60, y: 50 }] },
+      { id: 'e', name: '戊', radius: 0, keys: [{ t: 0, x: 65, y: 50 }] }
+    ],
+    handoffs: [
+      // h1：甲×乙全程可交接，d=8 → 排定 [0,8]
+      Object.assign({ id: 'h1', aId: 'a', bId: 'b', reach: 10, minDuration: 8 }, zone),
+      // h2：甲×丙时窗 [4,7]，甲被 h1 占用到 8 → 排程冲突
+      Object.assign({ id: 'h2', aId: 'a', bId: 'c', reach: 200, minDuration: 1 }, zone),
+      // h3：乙×丙涉冲突项参与者丙 → 前序未完成
+      Object.assign({ id: 'h3', aId: 'b', bId: 'c', reach: 200, minDuration: 1 }, zone),
+      // h4：丁×戊与上述无共用 → 并行排定 [0,1]
+      Object.assign({ id: 'h4', aId: 'd', bId: 'e', reach: 10, minDuration: 1 }, zone)
+    ]
+  };
+  const r = await postAnalyze(body);
+  assert.equal(r.status, 200);
+  assert.equal(r.json.handoffSchedule.length, 4);
+  const [s1, s2, s3, s4] = r.json.handoffSchedule;
+  assert.equal(s1.handoffId, 'h1');
+  assert.equal(s1.status, 'scheduled');
+  assert.ok(Math.abs(s1.start - 0) < 1e-9);
+  assert.ok(Math.abs(s1.end - 8) < 1e-9);
+  assert.deepEqual(s1.window, [0, 4]); // 时窗 [0, 12-8]
+  assert.equal(s2.handoffId, 'h2');
+  assert.equal(s2.status, 'conflict');
+  assert.equal(s2.start, null);
+  assert.equal(s2.end, null);
+  assert.equal(s3.handoffId, 'h3');
+  assert.equal(s3.status, 'blocked');
+  assert.equal(s4.handoffId, 'h4');
+  assert.equal(s4.status, 'scheduled');
+  assert.ok(Math.abs(s4.start - 0) < 1e-9, '不共用表演者的项并行排定');
+  assert.ok(Math.abs(s4.end - 1) < 1e-9);
+});
+
+test('POST /api/analyze：handoffSchedule 随列表顺序变化（同刻相接允许）', async () => {
+  const zone = { x: 40, y: 40, width: 40, height: 20 };
+  const performers = [
+    { id: 'a', name: '甲', radius: 0, keys: [{ t: 0, x: 50, y: 50 }] },
+    { id: 'b', name: '乙', radius: 0, keys: [{ t: 0, x: 55, y: 50 }] }
+  ];
+  const h1 = Object.assign({ id: 'h1', aId: 'a', bId: 'b', reach: 10, minDuration: 2 }, zone);
+  const h2 = Object.assign({ id: 'h2', aId: 'a', bId: 'b', reach: 10, minDuration: 2 }, zone);
+  const r = await postAnalyze({ duration: 12, performers, handoffs: [h1, h2] });
+  assert.equal(r.status, 200);
+  const [s1, s2] = r.json.handoffSchedule;
+  // 同一对表演者两项交接：h1 [0,2]，h2 不早于 h1 结束 → [2,4]（同刻相接允许）
+  assert.ok(Math.abs(s1.start - 0) < 1e-9);
+  assert.ok(Math.abs(s1.end - 2) < 1e-9);
+  assert.ok(Math.abs(s2.start - 2) < 1e-9);
+  assert.ok(Math.abs(s2.end - 4) < 1e-9);
 });
 
 test('GET /api/sample：样例携带交接配置，回传分析得可交接区间与起始时窗', async () => {

@@ -936,6 +936,105 @@ test('道具交接：拖走位即时重算，且配置随快照保存并在载�
   dom.window.close();
 });
 
+// ---------- 交接执行表 ----------
+
+test('交接执行表：启动即渲染样例排定行，点击已排起点跳转播放头；删光后隐藏', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+
+  const sched = doc.getElementById('handoff-schedule');
+  assert.ok(!sched.hidden, '有交接时执行表可见');
+  const rows = [...sched.querySelectorAll('.handoff-sched-row')];
+  assert.equal(rows.length, 1);
+  assert.match(rows[0].textContent, /①/);
+  assert.match(rows[0].textContent, /甲·横贯 × 乙·纵穿/);
+  assert.match(rows[0].textContent, /✓ 已排定/);
+  // 已排 5.18–5.68（时窗起点 5.18、持续 0.5s）
+  assert.match(rows[0].textContent, /5\.18–5\.68\s*s/);
+  const startChip = rows[0].querySelector('.handoff-sched-start');
+  assert.ok(startChip, '已排起点芯片可点击');
+  assert.ok(Math.abs(Number(startChip.getAttribute('data-t')) - 4560 / 880) < 1e-6);
+  startChip.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  const tv = Number(doc.getElementById('time-input').value);
+  assert.ok(Math.abs(tv - 5.18) < 0.01, `播放头应跳到 5.18，实际 ${tv}`);
+
+  // 删除唯一交接后执行表隐藏
+  doc.querySelector('.handoff-row .handoff-del').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  assert.ok(doc.getElementById('handoff-schedule').hidden, '无交接时执行表隐藏');
+  dom.window.close();
+});
+
+test('交接执行表：↑/↓ 调整顺序即时重排，未完成项使其参与者后续项前序未完成', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+
+  // 新增第二项交接（默认甲×乙、交接区在两人 t=0 中点，全程无满足区间）
+  doc.getElementById('btn-handoff-add').click();
+  await new Promise((r) => setTimeout(r, 5));
+  let rows = [...doc.querySelectorAll('.handoff-row')];
+  assert.equal(rows.length, 2);
+  // 行首顺序徽标与首行 ↑、末行 ↓ 禁用
+  assert.match(rows[0].querySelector('.handoff-ord').textContent, /①/);
+  assert.match(rows[1].querySelector('.handoff-ord').textContent, /②/);
+  assert.ok(rows[0].querySelectorAll('.handoff-nav')[0].disabled, '首行 ↑ 禁用');
+  assert.ok(rows[1].querySelectorAll('.handoff-nav')[1].disabled, '末行 ↓ 禁用');
+
+  function schedRows() {
+    return [...doc.querySelectorAll('#handoff-schedule .handoff-sched-row')];
+  }
+  // 初始顺序：① 样例（已排定）② 新增（无可行时窗）
+  let sr = schedRows();
+  assert.equal(sr.length, 2);
+  assert.match(sr[0].textContent, /✓ 已排定/);
+  assert.match(sr[1].textContent, /无可行时窗/);
+
+  // 把新增项上移为 ①：它无有效时窗 → 样例项涉及其参与者（甲/乙）→ 前序未完成
+  rows[1].querySelectorAll('.handoff-nav')[0].dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  rows = [...doc.querySelectorAll('.handoff-row')];
+  assert.match(rows[0].querySelector('.handoff-result').textContent, /全程不同时满足/,
+    '新增项已上移为首行');
+  sr = schedRows();
+  assert.match(sr[0].textContent, /无可行时窗/);
+  assert.match(sr[1].textContent, /前序未完成/, '顺序变化后执行表即时重排并传递未完成');
+
+  // 再移回：样例恢复已排定
+  rows[0].querySelectorAll('.handoff-nav')[1].dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  sr = schedRows();
+  assert.match(sr[0].textContent, /✓ 已排定/);
+  assert.match(sr[1].textContent, /无可行时窗/);
+  dom.window.close();
+});
+
+test('交接执行表：拖走位即时重算——样例交接变为无可行时窗', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+  const canvas = doc.getElementById('stage');
+
+  function pointer(type, x, y) {
+    canvas.dispatchEvent(new window.MouseEvent(type, {
+      bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0
+    }));
+  }
+
+  const sched = () => doc.querySelector('#handoff-schedule .handoff-sched-row').textContent;
+  assert.match(sched(), /✓ 已排定/);
+
+  // 拖动乙首帧 (500,40) -> (300,40)：乙不再经过中央交接区
+  pointer('pointerdown', 500, 40);
+  pointer('pointermove', 300, 40);
+  pointer('pointerup', 300, 40);
+  await new Promise((r) => setTimeout(r, 10));
+  assert.match(sched(), /无可行时窗/, '拖走位后执行表即时重算');
+  assert.ok(!doc.querySelector('.handoff-sched-start'), '无可行时窗项无起点芯片');
+  dom.window.close();
+});
+
 // ---------- 区域限员 ----------
 
 test('区域限员：启动即渲染样例限员区，超员段/人数/名单/峰值正确，点击起点跳转', async () => {
